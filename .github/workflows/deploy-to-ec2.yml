@@ -1,0 +1,136 @@
+name: EC2 Provision, Deploy HTML/CSS, Apache, Grafana
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      INSTANCE_TYPE: t2.micro
+      AMI_ID: ami-0c7217cdde317cfec # Ubuntu 22.04 in us-east-1
+      SECURITY_GROUP_NAME: github-actions-sg
+      INSTANCE_NAME: html-css-instance
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Create Security Group (if not exists)
+      run: |
+        aws ec2 describe-security-groups --group-names $SECURITY_GROUP_NAME || \
+        aws ec2 create-security-group --group-name $SECURITY_GROUP_NAME --description "GitHub Actions SG"
+
+        # Allow SSH, HTTP, Grafana ports
+        GROUP_ID=$(aws ec2 describe-security-groups --group-names $SECURITY_GROUP_NAME --query 'SecurityGroups[0].GroupId' --output text)
+
+        for port in 22 80 3000; do
+          aws ec2 authorize-security-group-ingress \
+            --group-id $GROUP_ID \
+            --protocol tcp \
+            --port $port \
+            --cidr 0.0.0.0/0 || true
+        done
+
+    - name: Launch EC2 Instance
+      id: launch
+      run: |
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id $AMI_ID \
+          --instance-type $INSTANCE_TYPE \
+          --key-name ${{ secrets.KEY_PAIR_NAME }} \
+          --security-groups $SECURITY_GROUP_NAME \
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]" \
+          --query 'Instances[0].InstanceId' \
+          --output text)
+
+        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+
+        aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+
+        PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+        echo "EC2 is live at $PUBLIC_IP"
+
+    - name: Save EC2 IP to file
+      run: echo "$PUBLIC_IP" > ec2_ip.txt
+
+    - name: Setup SSH Access
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H "$PUBLIC_IP" >> ~/.ssh/known_hosts
+
+    - name: Install Apache, Push Files, Start Apache & Grafana
+      run: |
+        ssh -o StrictHostKeyChecking=no ubuntu@$PUBLIC_IP << 'EOF'
+          # Update system
+          sudo apt update -y
+
+          # Install Apache
+          sudo apt install -y apache2
+
+          # Install Grafana
+          sudo apt install -y software-properties-common wget gpg
+          wget -q -O - https://packages.grafana.com/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/grafana.gpg
+          echo "deb [signed-by=/usr/share/keyrings/grafana.gpg] https://packages.grafana.com/oss/deb stable main" | sudo tee /etc/apt/sources.list.d/grafana.list
+          sudo apt update -y
+          sudo apt install -y grafana
+          sudo systemctl enable grafana-server
+          sudo systemctl start grafana-server
+
+          # Pre-provision dashboard
+          sudo mkdir -p /etc/grafana/provisioning/dashboards
+          sudo mkdir -p /var/lib/grafana/dashboards
+
+          cat <<EOC | sudo tee /etc/grafana/provisioning/dashboards/sample.yaml
+          apiVersion: 1
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              options:
+                path: /var/lib/grafana/dashboards
+          EOC
+
+          cat <<EOD | sudo tee /var/lib/grafana/dashboards/sample-dashboard.json
+          {
+            "title": "GitHub Dashboard",
+            "panels": [{
+              "type": "text",
+              "title": "Deployed from GitHub Actions",
+              "gridPos": { "x": 0, "y": 0, "w": 24, "h": 5 },
+              "options": {
+                "content": "<h1>Success!</h1>",
+                "mode": "html"
+              }
+            }],
+            "schemaVersion": 30,
+            "version": 1
+          }
+          EOD
+
+          sudo systemctl restart grafana-server
+        EOF
+
+    - name: Copy HTML/CSS files to EC2 Apache Webroot
+      run: |
+        scp -r ./html ./css ubuntu@$PUBLIC_IP:/tmp/
+        ssh ubuntu@$PUBLIC_IP "sudo cp -r /tmp/html/* /var/www/html/ && sudo cp -r /tmp/css/* /var/www/html/ && sudo systemctl restart apache2"
+
+    - name: Display Public Endpoints
+      run: |
+        echo "🚀 Web App:     http://$PUBLIC_IP"
+        echo "📊 Grafana:     http://$PUBLIC_IP:3000"
