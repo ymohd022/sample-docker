@@ -1,83 +1,60 @@
-name: Deploy HTML/CSS to EC2 with Apache, Tomcat, and Grafana
+name: EC2 Deployment
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    env:
-      REGION: us-east-1
-      AMI_ID: ami-0f5ee92e2d63afc18  # Ubuntu 22.04 LTS (Mumbai)
-      INSTANCE_TYPE: t2.micro
-
     steps:
-    - name: Checkout Repository
+    - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Launch EC2 Instance
-      id: ec2
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Setup SSH key
       run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+      shell: bash
+
+    - name: Launch EC2 Instance
+      id: launch
+      run: |
+        echo "Launching EC2 instance..."
         INSTANCE_ID=$(aws ec2 run-instances \
-          --image-id ${{ env.AMI_ID }} \
+          --image-id ami-0f5ee92e2d63afc18 \
           --count 1 \
-          --instance-type ${{ env.INSTANCE_TYPE }} \
+          --instance-type t2.micro \
           --key-name ${{ secrets.KEY_PAIR_NAME }} \
-          --security-group-ids ${{ secrets.SECURITY_GROUP }} \
+          --security-group-ids ${{ secrets.SECURITY_GROUP_ID }} \
           --subnet-id ${{ secrets.SUBNET_ID }} \
-          --region ${{ env.REGION }} \
-          --query 'Instances[0].InstanceId' --output text)
+          --region ${{ secrets.AWS_REGION }} \
+          --query 'Instances[0].InstanceId' \
+          --output text)
 
         echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-
-        echo "Waiting for EC2 instance to be running..."
-        aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.REGION }}
+        echo "Waiting for instance to be running..."
+        aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ secrets.AWS_REGION }}
 
         PUBLIC_DNS=$(aws ec2 describe-instances \
           --instance-ids $INSTANCE_ID \
-          --region ${{ env.REGION }} \
+          --region ${{ secrets.AWS_REGION }} \
           --query 'Reservations[0].Instances[0].PublicDnsName' \
           --output text)
 
         echo "EC2_HOST=$PUBLIC_DNS" >> $GITHUB_ENV
         echo "Public DNS: $PUBLIC_DNS"
 
-    - name: Setup SSH
+    - name: SSH into EC2 (Optional)
       run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
-
-    - name: Install Apache, Tomcat, and Grafana
-      run: |
-        ssh -i ~/.ssh/id_rsa ubuntu@$EC2_HOST << EOF
-          sudo apt update -y
-          sudo apt install apache2 -y
-          sudo apt install default-jdk -y
-          wget https://downloads.apache.org/tomcat/tomcat-9/v9.0.86/bin/apache-tomcat-9.0.86.tar.gz
-          tar -xvzf apache-tomcat-9.0.86.tar.gz
-          sudo mv apache-tomcat-9.0.86 /opt/tomcat
-
-          sudo apt install -y software-properties-common
-          sudo apt-add-repository "deb https://packages.grafana.com/oss/deb stable main"
-          wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
-          echo "deb https://packages.grafana.com/oss/deb stable main" | sudo tee /etc/apt/sources.list.d/grafana.list
-          sudo apt update -y
-          sudo apt install grafana -y
-          sudo systemctl enable --now grafana-server
-
-          sudo systemctl restart apache2
-        EOF
-
-    - name: Upload HTML/CSS to EC2 Apache Directory
-      run: |
-        scp -i ~/.ssh/id_rsa -r ./html/* ubuntu@$EC2_HOST:/var/www/html/
-
-    - name: Output Application URL
-      run: |
-        echo "Apache Website: http://$EC2_HOST"
-        echo "Grafana: http://$EC2_HOST:3000"
+        echo "Connecting to EC2 instance..."
+        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_HOST }} "echo Hello from EC2"
