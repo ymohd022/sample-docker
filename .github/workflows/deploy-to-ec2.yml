@@ -1,0 +1,101 @@
+name: Deploy HTML/CSS and Setup EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Setup SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Install Apache Tomcat, Apache2, and Grafana; Push Files; Start Services
+      run: |
+        ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          # Update & install packages
+          sudo apt update -y
+          sudo apt install -y apache2 wget unzip
+
+          # Install Apache Tomcat
+          TOMCAT_VERSION=9.0.85
+          cd /opt
+          sudo wget https://dlcdn.apache.org/tomcat/tomcat-9/v$TOMCAT_VERSION/bin/apache-tomcat-$TOMCAT_VERSION.tar.gz
+          sudo tar -xvzf apache-tomcat-$TOMCAT_VERSION.tar.gz
+          sudo ln -s apache-tomcat-$TOMCAT_VERSION tomcat
+          sudo chmod +x tomcat/bin/*.sh
+
+          # Start Tomcat
+          sudo nohup tomcat/bin/startup.sh &
+
+          # Start Apache
+          sudo systemctl enable apache2
+          sudo systemctl start apache2
+
+          # Install Grafana
+          sudo apt install -y software-properties-common
+          sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
+          wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
+          sudo apt update
+          sudo apt install -y grafana
+          sudo systemctl enable grafana-server
+          sudo systemctl start grafana-server
+
+          # Create directory for prebuilt dashboard
+          sudo mkdir -p /etc/grafana/provisioning/dashboards
+          sudo mkdir -p /var/lib/grafana/dashboards
+
+          # Write dashboard provisioning config
+          cat <<EOC | sudo tee /etc/grafana/provisioning/dashboards/sample.yaml
+          apiVersion: 1
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              options:
+                path: /var/lib/grafana/dashboards
+          EOC
+
+          # Write sample dashboard JSON
+          cat <<EOD | sudo tee /var/lib/grafana/dashboards/sample-dashboard.json
+          {
+            "annotations": {
+              "list": []
+            },
+            "panels": [
+              {
+                "type": "text",
+                "title": "Welcome",
+                "gridPos": { "x": 0, "y": 0, "w": 24, "h": 3 },
+                "options": {
+                  "content": "<h1>Welcome to Grafana Dashboard</h1>",
+                  "mode": "html"
+                }
+              }
+            ],
+            "schemaVersion": 26,
+            "version": 1,
+            "title": "Sample Dashboard"
+          }
+          EOD
+
+          # Restart Grafana to load dashboard
+          sudo systemctl restart grafana-server
+
+        EOF
+
+    - name: Upload HTML/CSS to EC2 Apache Directory
+      run: |
+        scp -r ./html/* ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/
+        ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "sudo cp -r /tmp/* /var/www/html/"
