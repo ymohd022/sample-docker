@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: Deploy HTML/CSS to EC2 and Setup Services
 
 on:
   push:
@@ -17,8 +17,6 @@ jobs:
       SECURITY_GROUP_ID: ${{ secrets.SECURITY_GROUP_ID }}
       KEY_PAIR_NAME: ${{ secrets.KEY_PAIR_NAME }}
       PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
       - name: Checkout repo
@@ -34,7 +32,6 @@ jobs:
       - name: Launch EC2 instance
         id: ec2
         run: |
-          echo "Launching EC2 instance..."
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ami-020cba7c55df1f615 \
             --instance-type t2.micro \
@@ -45,17 +42,21 @@ jobs:
             --query 'Instances[0].InstanceId' \
             --output text)
 
-          echo "Waiting for instance to be running..."
           aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
-          echo "Fetching Public DNS..."
           EC2_HOST=$(aws ec2 describe-instances \
             --instance-ids "$INSTANCE_ID" \
             --query 'Reservations[0].Instances[0].PublicDnsName' \
             --output text)
 
+          EC2_IP=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
           echo "EC2_HOST=$EC2_HOST" >> $GITHUB_ENV
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
 
       - name: Save private key
         run: |
@@ -65,12 +66,51 @@ jobs:
 
       - name: Wait for EC2 SSH to be ready
         run: |
-          echo "Waiting for SSH to be available..."
           for i in {1..10}; do
             nc -zv $EC2_HOST 22 && break || sleep 10
           done
 
-      - name: SSH into EC2 (Optional)
+      - name: Deploy to EC2 (Install Apache, Tomcat, Grafana, Push HTML/CSS)
         run: |
-          echo "Connecting to EC2 instance..."
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$EC2_HOST "echo Hello from EC2"
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$EC2_HOST << 'EOF'
+            sudo apt-get update -y
+
+            # Install Apache
+            sudo apt-get install apache2 -y
+            sudo systemctl enable apache2
+            sudo systemctl start apache2
+
+            # Install Java (for Tomcat)
+            sudo apt-get install default-jdk -y
+
+            # Install Tomcat
+            wget https://downloads.apache.org/tomcat/tomcat-9/v9.0.85/bin/apache-tomcat-9.0.85.tar.gz
+            tar xzvf apache-tomcat-9.0.85.tar.gz
+            sudo mv apache-tomcat-9.0.85 /opt/tomcat
+            sudo chmod +x /opt/tomcat/bin/*.sh
+            sudo sh /opt/tomcat/bin/startup.sh
+
+            # Install Grafana
+            sudo apt-get install -y software-properties-common apt-transport-https
+            sudo apt-get install -y wget
+            wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
+            echo "deb https://packages.grafana.com/oss/deb stable main" | sudo tee /etc/apt/sources.list.d/grafana.list
+            sudo apt-get update -y
+            sudo apt-get install grafana -y
+            sudo systemctl enable grafana-server
+            sudo systemctl start grafana-server
+
+            # Clone your repo and move HTML/CSS
+            git clone https://github.com/ymohd022/sample-docker.git
+            sudo cp -r sample-docker/* /var/www/html/
+
+            # Restart Tomcat to reflect changes
+            sudo sh /opt/tomcat/bin/shutdown.sh
+            sleep 5
+            sudo sh /opt/tomcat/bin/startup.sh
+          EOF
+
+      - name: Output public IP and Grafana endpoint
+        run: |
+          echo "EC2 Public IP: $EC2_IP"
+          echo "Grafana URL: http://$EC2_IP:3000"
