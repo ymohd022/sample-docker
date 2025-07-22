@@ -31,7 +31,7 @@ jobs:
       run: |
         echo "Launching EC2 instance..."
         INSTANCE_ID=$(aws ec2 run-instances \
-          --image-id ami-0f5ee92e2d63afc18 \
+          --image-id ami-020cba7c55df1f615 \
           --count 1 \
           --instance-type t2.micro \
           --key-name ${{ secrets.KEY_PAIR_NAME }} \
