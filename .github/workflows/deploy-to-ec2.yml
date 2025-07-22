@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      REGION: ap-south-1
+      REGION: us-east-1
       AMI_ID: ami-0f5ee92e2d63afc18  # Ubuntu 22.04 LTS (Mumbai)
       INSTANCE_TYPE: t2.micro
 
