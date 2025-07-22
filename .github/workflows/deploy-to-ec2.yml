@@ -1,60 +1,76 @@
-name: EC2 Deployment
+name: Deploy to EC2
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      SUBNET_ID: ${{ secrets.SUBNET_ID }}
+      SECURITY_GROUP_ID: ${{ secrets.SECURITY_GROUP_ID }}
+      KEY_PAIR_NAME: ${{ secrets.KEY_PAIR_NAME }}
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Setup SSH key
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-      shell: bash
+      - name: Launch EC2 instance
+        id: ec2
+        run: |
+          echo "Launching EC2 instance..."
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ami-020cba7c55df1f615 \
+            --instance-type t2.micro \
+            --key-name "$KEY_PAIR_NAME" \
+            --security-group-ids "$SECURITY_GROUP_ID" \
+            --subnet-id "$SUBNET_ID" \
+            --associate-public-ip-address \
+            --query 'Instances[0].InstanceId' \
+            --output text)
 
-    - name: Launch EC2 Instance
-      id: launch
-      run: |
-        echo "Launching EC2 instance..."
-        INSTANCE_ID=$(aws ec2 run-instances \
-          --image-id ami-020cba7c55df1f615 \
-          --count 1 \
-          --instance-type t2.micro \
-          --key-name ${{ secrets.KEY_PAIR_NAME }} \
-          --security-group-ids ${{ secrets.SECURITY_GROUP_ID }} \
-          --subnet-id ${{ secrets.SUBNET_ID }} \
-          --region ${{ secrets.AWS_REGION }} \
-          --query 'Instances[0].InstanceId' \
-          --output text)
+          echo "Waiting for instance to be running..."
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
-        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-        echo "Waiting for instance to be running..."
-        aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ secrets.AWS_REGION }}
+          echo "Fetching Public DNS..."
+          EC2_HOST=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PublicDnsName' \
+            --output text)
 
-        PUBLIC_DNS=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_ID \
-          --region ${{ secrets.AWS_REGION }} \
-          --query 'Reservations[0].Instances[0].PublicDnsName' \
-          --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "EC2_HOST=$EC2_HOST" >> $GITHUB_ENV
 
-        echo "EC2_HOST=$PUBLIC_DNS" >> $GITHUB_ENV
-        echo "Public DNS: $PUBLIC_DNS"
+      - name: Save private key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${PRIVATE_KEY}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
 
-    - name: SSH into EC2 (Optional)
-      run: |
-        echo "Connecting to EC2 instance..."
-        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ env.EC2_HOST }} "echo Hello from EC2"
+      - name: Wait for EC2 SSH to be ready
+        run: |
+          echo "Waiting for SSH to be available..."
+          for i in {1..10}; do
+            nc -zv $EC2_HOST 22 && break || sleep 10
+          done
+
+      - name: SSH into EC2 (Optional)
+        run: |
+          echo "Connecting to EC2 instance..."
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@$EC2_HOST "echo Hello from EC2"
